@@ -22,11 +22,11 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA 
 #
-import sys, os, copy, sqlite3, wmi, win32com.client, shutil, win32file, re, time
+import sys, os, sqlite3, wmi, win32com.client, shutil, win32file
 
 from error_classes import *
 
-class acquire_files:
+class acquere_files:
 
     def __init__(self, output_directory, acquire_current, acquire_backups, compdesc, gui=None):
     
@@ -49,7 +49,7 @@ class acquire_files:
         except Exception, e:
             pass
 
-        self.db_ops(output_directory)    
+        self.db_ops()    
     
     def connect_db(self, directory, db_name):
 
@@ -59,7 +59,7 @@ class acquire_files:
 
         return (conn, cursor)
       
-    def db_ops(self, case_dir):
+    def db_ops(self):
  
         (self.conn, self.cursor) = self.connect_db(self.store_dir, "acquire_files.db")
         
@@ -70,8 +70,11 @@ class acquire_files:
         if not self.cursor.fetchall():
             
             tables = ["evidence_sources (filename text,   id integer primary key asc)",
-                      "file_groups      (group_name text, evidence_file_id int, id integer primary key asc)",
-                      "registry_files   (filename text,  mtime text, group_id int, file_id int, id integer primary key asc)",
+                      "partitions       (number int, offset int, evidence_file_id int, id integer primary key asc)"
+                      "file_groups      (group_name text, partition_id int, id integer primary key asc)",
+                      "reg_type         (type_name text, file_group_id int, id integer primary key asc)",
+                      "rp_groups        (rpname text, reg_type_id int, id integer primary key asc)",
+                      "registry_files   (filename text,  mtime text, reg_type_id int, file_id int, file_type int, id integer primary key asc)",
                      ]
     
             for table in tables:
@@ -82,20 +85,15 @@ class acquire_files:
     # enforces unique group_name and evidence_id pairs
     def group_id(self, group_name):
 
-        ''' 
-        there has to be a better way to do this
-        but "insert or replace" changes the auto increment id
-        '''
+        part_id = self.part_id
 
-        evi_id = self.evidence_id
-
-        self.cursor.execute("select id from file_groups where group_name=? and evidence_file_id=?", [group_name, evi_id])
+        self.cursor.execute("select id from file_groups where group_name=? and partition_id=?", [group_name, part_id])
 
         res = self.cursor.fetchone()
         
         # group doesn't exist for evidence file
         if not res:
-            self.cursor.execute("insert into file_groups (group_name, evidence_file_id) values (?,?)", [group_name, evi_id])
+            self.cursor.execute("insert into file_groups (group_name, partition_id) values (?,?)", [group_name, part_id])
             ret_id = self.cursor.execute("SELECT last_insert_rowid()").fetchone()[0]
         
         else:
@@ -103,16 +101,15 @@ class acquire_files:
 
         return ret_id
 
-    def insert_reg_file(self, group_name, file_name, mtime):
+    def insert_reg_file(self, group_name, tid, file_name, file_type, mtime):
 
-        gid = self.group_id(group_name)
         file_id = self.regfile_ctr
 
-        self.cursor.execute("insert into registry_files (filename, group_id, file_id, mtime) values (?,?,?,?)", [file_name, gid, file_id, mtime])
+        self.cursor.execute("insert into registry_files (filename, reg_type_id, file_id, file_type, mtime) values (?,?,?,?)", [file_name, tid, file_id, file_type, mtime])
 
         self.regfile_ctr = self.regfile_ctr + 1
         
-    def grab_file(self, group_name, directory, fname, realname=""):
+    def grab_file(self, type_name, directory, fname, group_id, is_rp=0, realname=""):
 
         srcfile  = os.path.join(directory, fname)
         destfile = os.path.join(self.store_dir, "%d" % self.regfile_ctr)
@@ -128,30 +125,67 @@ class acquire_files:
         if realname:
             fname = realname
 
+        if not is_rp:
+            tid = self.type_id(type_name, group_id)
+        else:
+            tid = group_id
+
         # put info into database
-        self.insert_reg_file(group_name, fname, mtime) 
+        self.insert_reg_file(type_name, tid, fname, is_rp, mtime)
     
         self.added_files.append(srcfile)
+
+    def type_id(self, type_name, gid=-1):
+
+        if gid == -1:
+            group_id = self.gid
+        else:
+            group_id = gid
+
+        self.cursor.execute("select id from reg_type where type_name=? and file_group_id=?", [type_name, group_id])
+
+        res = self.cursor.fetchone()
+        
+        # group doesn't exist for evidence file
+        if not res:
+            self.cursor.execute("insert into reg_type (type_name, file_group_id) values (?,?)", [type_name, group_id])
+            ret_id = self.cursor.execute("SELECT last_insert_rowid()").fetchone()[0]
+        
+        else:
+            ret_id = res[0]
+
+        return ret_id
+
+    def new_rp(self, rpname, rtype_id):
+
+        self.cursor.execute("insert into rp_groups (rpname, reg_type_id) values (?,?)", [rpname, rtype_id])
+
+        return self.cursor.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     # grabs each registry file from an RP###/snapshot directory
     def parse_rp_folder(self, directory, group_name):
         
+        core_id = -1
+
         # walk the snaphsot dir / it may not exist
         for root, dirs, files in os.walk(directory):
+            
+            if core_id == -1:
+                rp_id     = self.type_id(group_name)
+                core_id   = self.new_rp("CORE",   rp_id)
+                ntuser_id = self.new_rp("NTUSER", rp_id)                
 
             for fname in files:
-            
-                if fname.startswith("_REGISTRY_MACHINE"):
-                    self.grab_file(group_name, directory, fname)
-                    
-                elif fname.startswith("_REGISTRY_USER"):
                 
-                    # kludge for now... RPs will get updated to know live/ntuser if people care
-                    if group_name == "CORE":
-                        group_name = "NTUSER"
-                        
-                    self.grab_file(group_name, directory, fname)
-                    self.refreshgui()
+                if fname.startswith("_REGISTRY_MACHINE_"):
+                    fname = fname[len("_REGISTRY_MACHINE_"):]
+                    self.grab_file(group_name, directory, fname, core_id, is_rp=1)
+        
+                elif fname.startswith("_REGISTRY_USER_"):
+                    fname = fname[len("_REGISTRY_USER_"):]
+                    self.grab_file(group_name, directory, fname, ntuser_id, is_rp=1)
+
+                self.refreshgui()
                     
     # parse RP structure
     def parse_system_restore(self, path, idx, group_name):
@@ -178,6 +212,7 @@ class acquire_files:
     def acquire_backup_files(self, idxs):
 
         for idx in idxs:
+            
             self.handle_sys_restore(idx, "RP%d" % idx)
         
     # get the active core & user registry files
@@ -254,11 +289,11 @@ class acquire_files:
             win32file.CreateSymbolicLink(vssfolder, shadow, 1)
         except Exception, e:
             #print "Exception: %s" % str(e)
-            vssfolder = self.get_vss_dir(shadow, i + 1)
+            (vssfolder, i) = self.get_vss_dir(shadow, i + 1)
             
-        return vssfolder
+        return (vssfolder, i)
         
-    def get_core_files_vss(self, directory, group_name):
+    def get_core_files_vss(self, directory, group_name, is_rp, gid):
     
         corefiles = ["SAM", "SECURITY", "SYSTEM", "SOFTWARE", "DEFAULT"]
 
@@ -268,10 +303,10 @@ class acquire_files:
 
         for fname in corefiles:
                    
-            self.grab_file(group_name, corepath, fname)
+            self.grab_file(group_name, corepath, fname, gid, is_rp=is_rp)
             self.refreshgui()
             
-    def get_user_files_vss(self, shadow, group_name):
+    def get_user_files_vss(self, shadow, group_name, is_rp, gid):
     
         userspath = os.path.join(shadow, "Users")
         
@@ -282,35 +317,44 @@ class acquire_files:
             fpath  = os.path.join(ntpath, "ntuser.dat")
                 
             if os.path.exists(fpath):
-                self.grab_file(group_name, ntpath, "ntuser.dat", username)
+                self.grab_file(group_name, ntpath, "ntuser.dat", gid, is_rp=is_rp, realname=username)
                 self.refreshgui()
                     
-    def get_vss_reg_files(self, shadow, linkdir, active):
+    def get_vss_reg_files(self, shadow, linkdir, active, num):
     
         if active:
             group_name = "CORE"
+            is_rp = 0
+            core_id = self.gid
+            ntuser_id = self.gid
         else:
-            # this gets the number of the copy 
-            group_name = "VSS" + (re.match("\D+(\d+)", shadow).groups()[0])
-        
+            group_name = "VSS%d" % num
+            
+            rp_id = self.type_id(group_name, self.gid)
+
+            core_id   = self.new_rp("CORE",   rp_id)
+            ntuser_id = self.new_rp("NTUSER", rp_id)        
+
+            is_rp = 1
+
         self.refreshgui()
-        self.get_core_files_vss(linkdir, group_name)
+        self.get_core_files_vss(linkdir, group_name, is_rp, core_id)
         self.refreshgui()
         
         if active:
             group_name = "NTUSER"
         
         self.refreshgui()      
-        self.get_user_files_vss(linkdir, group_name)
+        self.get_user_files_vss(linkdir, group_name, is_rp, ntuser_id)
         self.refreshgui()
         
     def acquire_active_files_vss(self, shadow, active=1):
     
         # this is where the 'shadow' is mounted
-        linkdir = self.get_vss_dir(shadow)
+        (linkdir, num) = self.get_vss_dir(shadow)
 
         self.refreshgui()
-        self.get_vss_reg_files(shadow, linkdir, active)
+        self.get_vss_reg_files(shadow, linkdir, active, num)
         self.refreshgui()
         
         win32file.RemoveDirectory(linkdir)
@@ -378,8 +422,11 @@ class acquire_files:
         self.updateLabel("Starting Processing")
     
         self.cursor.execute("insert into evidence_sources (filename) values (?)", [self.compdesc])
-        self.evidence_id = self.cursor.execute("SELECT last_insert_rowid()").fetchone()[0] 
-    
+        evi_id = self.cursor.execute("SELECT last_insert_rowid()").fetchone()[0] 
+   
+        self.cursor.execute("insert into partitions (number, offset, evidence_file_id) values (?, ?, ?)", [0, 0, evi_id])
+        self.part_id = self.cursor.execute("SELECT last_insert_rowid()").fetchone()[0]
+ 
         (current, backups) = self.get_vss(self.acquire_current)
         
         # vss
@@ -388,13 +435,18 @@ class acquire_files:
             self.updateLabel("Processing the Volume Shadow Server")
 
             if self.acquire_backups:
+
+                self.gid = self.group_id("VSS")
+
                 self.updateLabel("Acquiring Backup Files")
                 self.acquire_backup_files_vss(backups)
-			
+		
             if self.acquire_current:
 
                 if not self.set_rp_point():
                     return False
+
+                self.gid = self.group_id("Current")
 
                 self.updateLabel("Acquiring Current Files")
                 self.acquire_active_files_vss(current)
@@ -407,6 +459,9 @@ class acquire_files:
             (current, backups) = self.get_rps(self.acquire_current)
          
             if self.acquire_backups:
+    
+                self.gid = self.group_id("RestorePoints")
+                
                 self.updateLabel("Acquiring Backup Files")
                 self.acquire_backup_files(backups)
            
@@ -415,10 +470,11 @@ class acquire_files:
                 if not self.set_rp_point():
                     return False
 
+                self.gid = self.group_id("Current")
+
                 self.updateLabel("Acquiring Current Files")
                 self.acquire_active_files(current)
                 self.conn.commit()
-                
                
         self.updateLabel("Final Processing")
         self.conn.commit()    
