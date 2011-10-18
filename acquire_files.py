@@ -190,7 +190,9 @@ class acquire_files:
         if self.gui:
             self.gui.resultsLabel.setText(msg)
             self.refreshgui()
-    
+        else:
+            print "UPDATE: %s" % msg   
+ 
     def refreshgui(self):
 
         if self.gui:
@@ -363,6 +365,12 @@ class acquire_files:
         # return the last one (the one we set) apart from the rest
         return (ret1, ret2)
     
+    def set_rp_point(self):
+
+        # this will set a traditional RP on XP type systems and force a VSS creation on vista/7
+        self.updateLabel("Setting System Restore Point")
+        return self.set_system_restore_point()
+     
     # gather all the files from the system
     # auto detect OS of image
     def acquire_files(self):       
@@ -372,13 +380,6 @@ class acquire_files:
         self.cursor.execute("insert into evidence_sources (filename) values (?)", [self.compdesc])
         self.evidence_id = self.cursor.execute("SELECT last_insert_rowid()").fetchone()[0] 
     
-        if self.acquire_current:
-            # this will set a traditional RP on XP type systems and force a VSS creation on vista/7
-            self.updateLabel("Setting System Restore Point")
-            ret = self.set_system_restore_point()
-            if ret == False:
-                return ret
-            
         (current, backups) = self.get_vss(self.acquire_current)
         
         # vss
@@ -386,33 +387,42 @@ class acquire_files:
         
             self.updateLabel("Processing the Volume Shadow Server")
 
-            if self.acquire_current:
-                self.updateLabel("Acquiring Current Files")
-                self.acquire_active_files_vss(current)
-                self.conn.commit()    
-
             if self.acquire_backups:
                 self.updateLabel("Acquiring Backup Files")
                 self.acquire_backup_files_vss(backups)
 			
+            if self.acquire_current:
+
+                if not self.set_rp_point():
+                    return False
+
+                self.updateLabel("Acquiring Current Files")
+                self.acquire_active_files_vss(current)
+                self.conn.commit()    
+
         # sys restore
         else:
             self.updateLabel("Processing System Restore Point Data")
 
             (current, backups) = self.get_rps(self.acquire_current)
+         
+            if self.acquire_backups:
+                self.updateLabel("Acquiring Backup Files")
+                self.acquire_backup_files(backups)
            
             if self.acquire_current:
+
+                if not self.set_rp_point():
+                    return False
+
                 self.updateLabel("Acquiring Current Files")
                 self.acquire_active_files(current)
                 self.conn.commit()
                 
-            if self.acquire_backups:
-                self.updateLabel("Acquiring Backup Files")
-                self.acquire_backup_files(backups)
-                
+               
         self.updateLabel("Final Processing")
         self.conn.commit()    
-        self.updateLabel("Finished Processing")
+        self.updateLabel("Finished Processing. Files successfully acquired.")
 
         return True
 
