@@ -417,6 +417,8 @@ class acquire_files:
                 if not self.set_rp_point():
                     return False
 
+                current = self.get_shadows()[-1]
+
                 self.gid = self.group_id("Current")
 
                 self.updateLabel("Acquiring Current Files")
