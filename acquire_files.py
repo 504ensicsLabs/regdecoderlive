@@ -256,10 +256,6 @@ class acquire_files:
                 
         ret = retval.Properties_.Item('ReturnValue').Value
     
-        seq = retval.Properties_.Item('SequenceNumber').Value       
- 
-        print seq
-
         if ret != 0:
             self.gui.msgBox("Unable to create a System Restore Point. Please check that you are running as administrator and that this computer has System Restore Point enabled.")
             return False
@@ -370,7 +366,7 @@ class acquire_files:
             self.acquire_active_files_vss(shadow, 0)
             self.refreshgui()
       
-    def get_rps(self, current):
+    def get_rps(self):
 
         ret = []
         
@@ -380,16 +376,7 @@ class acquire_files:
         for rp in allrps:
             ret.append(rp.SequenceNumber)
 
-        if current:
-            ret1 = ret[-1]
-            ret  = ret[:-1]
-        else:
-            ret1 = []
-            
-        ret2 = ret
-        
-        # return the last one (the one we set) apart from the rest
-        return (ret1, ret2)
+        return ret
     
     def set_rp_point(self):
 
@@ -441,9 +428,9 @@ class acquire_files:
 
             self.updateLabel("Processing System Restore Point Data")
 
-            (current, backups) = self.get_rps(self.acquire_current)
-         
             if self.acquire_backups:
+            
+                backups = self.get_rps()
     
                 self.gid = self.group_id("RestorePoints")
                 
@@ -454,6 +441,9 @@ class acquire_files:
 
                 if not self.set_rp_point():
                     return False
+
+                # get the last rp (the one we just made)
+                current = self.get_rps()[-1]
 
                 self.gid = self.group_id("Current")
 
