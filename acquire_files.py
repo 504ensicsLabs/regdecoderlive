@@ -105,7 +105,7 @@ class acquire_files:
 
         file_id = self.regfile_ctr
 
-        self.cursor.execute("insert into registry_files (filename, reg_type_id, file_id, file_type, mtime) values (?,?,?,?)", [file_name, tid, file_id, file_type, mtime])
+        self.cursor.execute("insert into registry_files (filename, reg_type_id, file_id, file_type, mtime) values (?,?,?,?,?)", [file_name, tid, file_id, file_type, mtime])
 
         self.regfile_ctr = self.regfile_ctr + 1
         
