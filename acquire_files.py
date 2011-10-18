@@ -255,11 +255,11 @@ class acquire_files:
             return False
                 
         ret = retval.Properties_.Item('ReturnValue').Value
-        
-        print "-----------"
-        print dir(retval.Properties_.Item)
-        print "--------------"
-        
+    
+        seq = retval.Properties_.Item('SequenceNumber').Value       
+ 
+        print seq
+
         if ret != 0:
             self.gui.msgBox("Unable to create a System Restore Point. Please check that you are running as administrator and that this computer has System Restore Point enabled.")
             return False
