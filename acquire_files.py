@@ -22,7 +22,7 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA 
 #
-import sys, os, sqlite3, wmi, win32com.client, shutil, win32file
+import sys, os, sqlite3, wmi, win32com.client, shutil, win32file, platform
 
 from error_classes import *
 
@@ -255,7 +255,11 @@ class acquire_files:
             return False
                 
         ret = retval.Properties_.Item('ReturnValue').Value
-                
+        
+        print "-----------"
+        print dir(retval.Properties_.Item)
+        print "--------------"
+        
         if ret != 0:
             self.gui.msgBox("Unable to create a System Restore Point. Please check that you are running as administrator and that this computer has System Restore Point enabled.")
             return False
@@ -366,28 +370,6 @@ class acquire_files:
             self.acquire_active_files_vss(shadow, 0)
             self.refreshgui()
       
-    def get_vss(self, current):
-    
-        # this gets the path to every active shadow thing
-        ret = self.get_shadows()
-            
-        if ret != []:
-        
-            if current:
-                ret1 = ret[-1]
-                ret  = ret[:-1]
-            else:
-                ret1 = []
-           
-            ret2 = ret
-            
-            ret = (ret1, ret2)
-            
-        else:
-            ret = ([], [])
-            
-        return ret
-        
     def get_rps(self, current):
 
         ret = []
@@ -427,14 +409,16 @@ class acquire_files:
         self.cursor.execute("insert into partitions (number, offset, evidence_file_id) values (?, ?, ?)", [0, 0, evi_id])
         self.part_id = self.cursor.execute("SELECT last_insert_rowid()").fetchone()[0]
  
-        (current, backups) = self.get_vss(self.acquire_current)
-        
+        winver = platform.release()
+
         # vss
-        if current != [] or backups != []:
+        if winver in ['Vista', '7']:
         
-            self.updateLabel("Processing the Volume Shadow Server")
+            self.updateLabel("Processing the Volume Shadow Service")
 
             if self.acquire_backups:
+            
+                backups = self.get_shadows()
 
                 self.gid = self.group_id("VSS")
 
@@ -453,7 +437,8 @@ class acquire_files:
                 self.conn.commit()    
 
         # sys restore
-        else:
+        elif winver == 'XP':
+
             self.updateLabel("Processing System Restore Point Data")
 
             (current, backups) = self.get_rps(self.acquire_current)
@@ -475,7 +460,11 @@ class acquire_files:
                 self.updateLabel("Acquiring Current Files")
                 self.acquire_active_files(current)
                 self.conn.commit()
-               
+
+        else:               
+            self.gui.msgBox("Your operating system is unsupported. Please file a bug if you are running on Windows 7, Vista, or XP.") 
+            return False
+
         self.updateLabel("Final Processing")
         self.conn.commit()    
         self.updateLabel("Finished Processing. Files successfully acquired.")
