@@ -70,7 +70,7 @@ class acquire_files:
         if not self.cursor.fetchall():
             
             tables = ["evidence_sources (filename text,   id integer primary key asc)",
-                      "partitions       (number int, offset int, evidence_file_id int, id integer primary key asc)"
+                      "partitions       (number int, offset int, evidence_file_id int, id integer primary key asc)",
                       "file_groups      (group_name text, partition_id int, id integer primary key asc)",
                       "reg_type         (type_name text, file_group_id int, id integer primary key asc)",
                       "rp_groups        (rpname text, reg_type_id int, id integer primary key asc)",
