@@ -178,12 +178,12 @@ class acquire_files:
             for fname in files:
                 
                 if fname.startswith("_REGISTRY_MACHINE_"):
-                    fname = fname[len("_REGISTRY_MACHINE_"):]
-                    self.grab_file(group_name, directory, fname, core_id, is_rp=1)
+                    realname = fname[len("_REGISTRY_MACHINE_"):]
+                    self.grab_file(group_name, directory, fname, core_id, is_rp=1, realname=realname)
         
                 elif fname.startswith("_REGISTRY_USER_"):
-                    fname = fname[len("_REGISTRY_USER_"):]
-                    self.grab_file(group_name, directory, fname, ntuser_id, is_rp=1)
+                    realname = fname[len("_REGISTRY_USER_"):]
+                    self.grab_file(group_name, directory, fname, ntuser_id, is_rp=1, realname=realname)
 
                 self.refreshgui()
                     
