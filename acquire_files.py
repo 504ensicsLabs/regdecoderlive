@@ -26,7 +26,7 @@ import sys, os, sqlite3, wmi, win32com.client, shutil, win32file
 
 from error_classes import *
 
-class acquere_files:
+class acquire_files:
 
     def __init__(self, output_directory, acquire_current, acquire_backups, compdesc, gui=None):
     
