@@ -40,6 +40,7 @@ class acquire_files:
         
         self.regfile_ctr = 0
         self.img_ctr     = 0
+        self.vss_ctr     = 0
         
         self.store_dir = os.path.join(output_directory, "registryfiles")
 
@@ -320,22 +321,27 @@ class acquire_files:
                 self.grab_file(group_name, ntpath, "ntuser.dat", gid, is_rp=is_rp, realname=username)
                 self.refreshgui()
                     
-    def get_vss_reg_files(self, shadow, linkdir, active, num):
-    
+    def get_vss_reg_files(self, shadow, linkdir, active):
+        
+            
+
         if active:
             group_name = "CORE"
-            is_rp = 0
-            core_id = self.gid
-            ntuser_id = self.gid
+            is_rp      = 0
+            core_id    = self.gid
+            ntuser_id  = self.gid
         else:
-            group_name = "VSS%d" % num
+
+            group_name = "VSS%d" % self.vss_ctr
             
-            rp_id = self.type_id(group_name, self.gid)
+            rp_id     = self.type_id(group_name, self.gid)
 
             core_id   = self.new_rp("CORE",   rp_id)
             ntuser_id = self.new_rp("NTUSER", rp_id)        
 
             is_rp = 1
+
+            self.vss_ctr = self.vss_ctr + 1
 
         self.refreshgui()
         self.get_core_files_vss(linkdir, group_name, is_rp, core_id)
@@ -351,10 +357,10 @@ class acquire_files:
     def acquire_active_files_vss(self, shadow, active=1):
     
         # this is where the 'shadow' is mounted
-        (linkdir, num) = self.get_vss_dir(shadow)
+        (linkdir, unused) = self.get_vss_dir(shadow)
 
         self.refreshgui()
-        self.get_vss_reg_files(shadow, linkdir, active, num)
+        self.get_vss_reg_files(shadow, linkdir, active)
         self.refreshgui()
         
         win32file.RemoveDirectory(linkdir)
