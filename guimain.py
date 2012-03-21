@@ -100,12 +100,12 @@ class regDecoderLiveGUI(QMainWindow, Ui_MainWindow):
         # write out log file
         fd = open(os.path.join(directory, "logfile.txt"), "w")
 
-        files = "\n".join([f for f in aq.added_files])
+        files = aq.added_files
         runtime = time.strftime('%Y/%m/%d %H:%M:%S')
         cur  = ["No", "Yes"][acquire_current]
         back = ["No", "Yes"][acquire_backups]
         
-        logdata = "Computer Descrption: %s\nCurrent Files Acquired: %s\nBackup  Files Acquired: %s\nAcquisition Time:       %s\nAcquired Files:\n%s\n" % \
+        logdata = "Computer Descrption:     %s\nCurrent Files Acquired: %s\nBackup Files Acquired:  %s\nAcquisition Time:       %s\nAcquired Files:      %d\n" % \
                     (compDesc, cur, back, runtime , files)
                   
         fd.write(logdata)

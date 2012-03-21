@@ -22,15 +22,426 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA 
 #
-import sys, os, sqlite3, wmi, win32com.client, shutil, win32file, platform
+import sys, os, sqlite3, win32com.client, shutil, win32file, platform, pytsk3
 
 from error_classes import *
 
+# based on pytsk3 documentation
+# returns the file as a python string
+def read_file(fd):
+
+    data = ""
+    offset = 0
+    BUFF_SIZE = 1024 * 1024
+
+    if fd.info.meta:
+        size = fd.info.meta.size
+    else:
+        return ""            
+
+    while offset < size:
+        available_to_read = min(BUFF_SIZE, size - offset)
+        cur = fd.read_random(offset, available_to_read)
+    
+        if not cur:
+            break
+
+        data = data + cur
+        offset += len(cur)
+
+    return data
+
+# grabs file from the raw drive
+def grab_raw_file(self, f, type_name, fname, group_id, is_rp=0, realname=""):
+
+    data = read_file(f)
+     
+    if data == "":
+        print "grab_file: unable to acquire file %s from %s" % (fname, type_name)
+        return
+
+    # copy file to acquire_store
+    fd = open(os.path.join(self.aq.store_dir, "%d" % self.aq.regfile_ctr), "wb")
+    fd.write(data)
+    fd.close()
+
+    if f.info.meta:
+        mtime = f.info.meta.mtime
+    else:
+        mtime = 0
+
+    if realname:
+        fname = realname
+
+    # notes about this
+    # is_rp controls whether its a file from a sys RP
+    # group_id for non-rp is core/ntuser in the first level
+    # group_id is last level for rp files
+
+    # put info into database
+    if not is_rp:
+        tid = self.aq.type_id(type_name, group_id)
+    else:
+        tid = group_id
+
+    self.aq.insert_reg_file(type_name, tid, fname, is_rp, mtime)
+    
+    self.aq.added_files = self.aq.added_files + 1
+    
+class rp_ops:
+
+    def __init__(self, osobj):
+        self.os = osobj
+        self.aq = osobj.aq
+
+    # grabs each registry file from an RP###/snapshot directory
+    def _parse_rp_folder(self, fs, directory, rpname, group_id):
+
+        if directory.info.meta:
+            # open file as a directory
+            directory = fs.open_dir(inode=directory.info.meta.addr)
+        else:
+            print "parse_rp_folder: unable to get %s" % rpname
+            return 
+
+        # puts the "RP###" folder under the _restore directory
+        rp_id = self.aq.type_id(rpname, group_id)
+
+        core_id   = self.aq.new_rp("CORE",   rp_id)
+        ntuser_id = self.aq.new_rp("NTUSER", rp_id)
+
+        # walk the snaphsot dir
+        for f in directory:
+            
+            fname = f.info.name.name
+
+            if fname.startswith("_REGISTRY_MACHINE_"):
+                fname = fname[len("_REGISTRY_MACHINE_"):]
+                grab_raw_file(self, f, rpname, fname, core_id, is_rp=1)
+    
+            elif fname.startswith("_REGISTRY_USER_"):
+                fname = fname[len("_REGISTRY_USER_"):]
+                grab_raw_file(self, f, rpname, fname, ntuser_id, is_rp=1)
+    
+    # parse RP structure
+    def _parse_system_restore(self, fs, directory, group_id):
+
+        if directory.info.meta:
+            # directory is sent in as a pytsk3.File
+            directory = fs.open_dir(inode=directory.info.meta.addr)
+        else:
+            print "parse_system_restore: unable to do anything"
+            return
+
+        # this uglyness walks each RP###/snapshot dir and sends to the file grab function
+        for subdir in directory:
+        
+            fname = subdir.info.name.name
+
+            if fname.startswith("RP"):
+
+                # only process still allocated restore points
+                if subdir.info.meta and (int(subdir.info.meta.flags) & 1) == 1: 
+                    subdir = fs.open_dir(inode=subdir.info.meta.addr)
+
+                    for f in subdir:
+
+                        name = f.info.name.name
+
+                        if name == "snapshot":
+               
+                            # grab the registry files
+                            self._parse_rp_folder(fs, f, fname, group_id)
+
+        
+    def _handle_sys_restore(self, fs):
+
+        try:
+            directory = fs.open_dir("System Volume Information")
+        except Exception, e:
+            print "Bug: sys vol info: %s" % str(e)
+            return
+
+        # this will hit restore files for XP
+        for f in directory:
+            
+            fname = f.info.name.name
+
+            if fname.startswith("_restore{"):
+                self.aq.group_id(fname)
+                self._parse_system_restore(fs, f, self.aq.gid)
+    
+    def _acquire_rps(self, fs):
+    
+        self._handle_sys_restore(fs)
+        
+    def acquire_files(self, fs):
+                    
+        self.aq.updateLabel("Acquiring Backup Files")        
+    
+        self._acquire_rps(fs)
+
+'''
+This only handles grabbing registry files from volume shadow service backups
+'''
+class vss_ops:
+
+    def __init__(self, osobj):
+        self.os = osobj
+        self.aq = osobj.aq
+
+        
+    def _grab_file(self, type_name, directory, fname, group_id, is_rp=0, realname=""):
+
+        srcfile  = os.path.join(directory, fname)
+        destfile = os.path.join(self.aq.store_dir, "%d" % self.aq.regfile_ctr)
+        
+        try:
+            mtime = os.path.getmtime(srcfile)
+        except:
+            print "directory broke: %s" % directory
+            print os.listdir(directory)
+
+        shutil.copy(srcfile, destfile)
+        
+        if realname:
+            fname = realname
+
+        if not is_rp:
+            tid = self.aq.type_id(type_name, group_id)
+        else:
+            tid = group_id
+
+        # put info into database
+        self.aq.insert_reg_file(type_name, tid, fname, is_rp, mtime)
+    
+        self.aq.added_files = self.aq.added_files + 1
+        
+    def _get_shadows(self):
+        
+        # kind of bruteforces possible shadow copy paths
+        
+        ret = []
+        
+        for i in xrange(0, 4096):
+        
+            path = "\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy" + "%d" % i
+
+            try:
+                fd = open(path, "rb")
+                ret.append(path)
+            except:
+                pass
+                
+        return ret
+    
+    def _get_core_files_vss(self, directory, group_name, is_rp, gid):
+    
+        corefiles = ["SAM", "SECURITY", "SYSTEM", "SOFTWARE", "DEFAULT"]
+
+        coreelements = [directory, "windows", "system32", "config"]
+
+        corepath = os.path.join(*coreelements)
+
+        for fname in corefiles:
+                   
+            self._grab_file(group_name, corepath, fname, gid, is_rp=is_rp)
+            self.aq.refreshgui()
+            
+    def _get_user_files_vss(self, shadow, group_name, is_rp, gid):
+    
+        userspath = os.path.join(shadow, "Users")
+        
+        for username in os.listdir(userspath):
+        
+            # path to a specific user
+            ntpath = os.path.join(userspath, username)
+            fpath  = os.path.join(ntpath, "ntuser.dat")
+                
+            if os.path.exists(fpath):
+                self._grab_file(group_name, ntpath, "ntuser.dat", gid, is_rp=is_rp, realname=username)
+                self.aq.refreshgui()
+    
+    def _get_vss_reg_files(self, linkdir, active):
+
+        group_name = "VSS%d" % self.aq.vss_ctr
+        
+        rp_id     = self.aq.type_id(group_name, self.aq.gid)
+        core_id   = self.aq.new_rp("CORE",   rp_id)
+        ntuser_id = self.aq.new_rp("NTUSER", rp_id)        
+        
+        is_rp = 1
+
+        self.aq.vss_ctr = self.aq.vss_ctr + 1
+        
+        self.aq.refreshgui()
+        
+        self._get_core_files_vss(linkdir, group_name, is_rp, core_id)
+            
+        self.aq.refreshgui()
+        
+        self._get_user_files_vss(linkdir, group_name, is_rp, ntuser_id)
+            
+        self.aq.refreshgui()
+  
+    # this gets the directory to make the symbolic link in
+    def _get_vss_dir(self, shadow, i=0):
+    
+        vssfolder = r"\registrydecodervss%d" % i
+
+        try:
+            win32file.CreateSymbolicLink(vssfolder, shadow, 1)
+        except Exception, e:
+            #print "Exception: %s" % str(e)
+            (vssfolder, i) = self._get_vss_dir(shadow, i + 1)
+            
+        return (vssfolder, i)
+       
+    def _acquire_backup_files(self, shadows):
+            
+        for shadow in shadows:
+            
+            (linkdir, unused) = self._get_vss_dir(shadow)
+
+            self.aq.refreshgui()
+            self._get_vss_reg_files(linkdir, 0)
+            self.aq.refreshgui()
+            
+            win32file.RemoveDirectory(linkdir)
+ 
+    def acquire_files(self, ignore):
+    
+        backups = self._get_shadows()
+
+        self.aq.group_id("VSS")
+
+        self.aq.updateLabel("Acquiring Backup Files")
+        self._acquire_backup_files(backups)
+
+# pulls files from under the filesystem to avoid permissions or open locks
+class raw_ops:
+
+    def __init__(self, osobj):
+        self.os = osobj
+        self.aq = osobj.aq
+        
+    '''
+    this ugly function is b/c windows has a case-insentive FS,
+    tsk doesn't so we have to try to read the file as both lower and upper case
+    if neither of those appear then we have to bail
+    '''
+    def open_hive(self, fs, directory, fname, raiseex=1):
+            
+        fpath = directory + "/" + fname.lower()
+        
+        try:
+            f = fs.open(path=fpath)
+        except:
+
+            try:
+                fpath = directory + "/" + fname.upper()
+                f = fs.open(path=fpath)
+            except:
+                if raiseex:
+                    print "BUG: could not find a valid name for %s" % fpath
+                    #raise RDError("BUG: could not find a valid name for %s" % fpath)
+                
+                f = None
+
+        return f    
+        
+    def get_core_files(self, fs, group_id):
+
+        dpath = "/".join(self.os.core_dir)
+
+        core_dir = fs.open_dir(path=dpath)
+
+        for fname in self.os.core_hives:
+        
+            f = self.open_hive(fs, dpath, fname)   
+
+            grab_raw_file(self, f, "CORE", fname, group_id)
+        
+    def get_user_files(self, fs, group_id):
+        
+        fd = fs.open_dir(path=self.os.user_dir)
+            
+        if hasattr(fd, "info"):
+            dname = fd.info.fs_file.name.name
+        elif hasattr(fd, "fs_file"):
+            dname = fd.fs_file.info.name.name
+        else:
+            raise RDError("Unable to get dname")
+
+        # each user directory
+        for f in fd:
+            
+            fname = f.info.name.name
+
+            if fname not in [".", ".."]:
+
+                flist = [dname, fname]
+                    
+                ff = self.open_hive(fs, "/".join(flist), "NTUSER.dat", 0)
+   
+                if ff: 
+                    # open the user's directory
+                    rname = ff.info.name.name
+
+                    grab_raw_file(self, ff, "NTUSER", "NTUSER.dat", group_id, realname=fname)    
+        
+    def acquire_files(self, fs):
+    
+        self.aq.group_id("Current")
+
+        self.aq.updateLabel("Acquiring Current Files")
+        
+        core_id    = self.aq.gid
+        ntuser_id  = self.aq.gid
+    
+        self.get_core_files(fs, core_id)
+        self.get_user_files(fs, ntuser_id)
+        
+        
+'''
+info per-os on how to acquire current and backup hives
+'''     
+class XP:
+
+    def __init__(self, aq):
+    
+        self.aq = aq
+    
+        self.core_dir   = ["WINDOWS", "system32", "config"]
+        self.core_hives = ["default", "SAM" , "SECURITY", "software", "system"]
+        
+        self.user_dir   = "Documents and Settings"
+        self.user_file  = "NTUSER.DAT"
+                    
+        self.current_ops = raw_ops(self)
+        self.backup_ops  = rp_ops(self)
+
+    
+class vista7:
+
+    def __init__(self, aq):
+    
+        self.aq = aq
+    
+        self.core_dir   = ["Windows", "System32", "config"]
+        self.core_hives = ["SYSTEM", "SOFTWARE", "SECURITY", "SAM", "DEFAULT"]
+        
+        self.user_dir   = "Users"
+        self.user_file  = "NTUSER.DAT"
+        
+        self.current_ops = raw_ops(self)
+        self.backup_ops  = vss_ops(self)   
+        
 class acquire_files:
 
     def __init__(self, output_directory, acquire_current, acquire_backups, compdesc, gui=None):
     
-        self.added_files = []
+        self.added_files = 0
 
         self.output_directory = output_directory
         self.acquire_current  = acquire_current
@@ -99,8 +510,8 @@ class acquire_files:
         
         else:
             ret_id = res[0]
-
-        return ret_id
+            
+        self.gid = ret_id
 
     def insert_reg_file(self, group_name, tid, file_name, file_type, mtime):
 
@@ -109,32 +520,6 @@ class acquire_files:
         self.cursor.execute("insert into registry_files (filename, reg_type_id, file_id, file_type, mtime) values (?,?,?,?,?)", [file_name, tid, file_id, file_type, mtime])
 
         self.regfile_ctr = self.regfile_ctr + 1
-        
-    def grab_file(self, type_name, directory, fname, group_id, is_rp=0, realname=""):
-
-        srcfile  = os.path.join(directory, fname)
-        destfile = os.path.join(self.store_dir, "%d" % self.regfile_ctr)
-        
-        try:
-            mtime = os.path.getmtime(srcfile)
-        except:
-            print "directory broke: %s" % directory
-            print os.listdir(directory)
-
-        shutil.copy(srcfile, destfile)
-        
-        if realname:
-            fname = realname
-
-        if not is_rp:
-            tid = self.type_id(type_name, group_id)
-        else:
-            tid = group_id
-
-        # put info into database
-        self.insert_reg_file(type_name, tid, fname, is_rp, mtime)
-    
-        self.added_files.append(srcfile)
 
     def type_id(self, type_name, gid=-1):
 
@@ -163,63 +548,6 @@ class acquire_files:
 
         return self.cursor.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    # grabs each registry file from an RP###/snapshot directory
-    def parse_rp_folder(self, directory, group_name):
-        
-        core_id = -1
-
-        # walk the snaphsot dir / it may not exist
-        for root, dirs, files in os.walk(directory):
-            
-            if core_id == -1:
-                rp_id     = self.type_id(group_name)
-                core_id   = self.new_rp("CORE",   rp_id)
-                ntuser_id = self.new_rp("NTUSER", rp_id)                
-
-            for fname in files:
-                
-                if fname.startswith("_REGISTRY_MACHINE_"):
-                    realname = fname[len("_REGISTRY_MACHINE_"):]
-                    self.grab_file(group_name, directory, fname, core_id, is_rp=1, realname=realname)
-        
-                elif fname.startswith("_REGISTRY_USER_"):
-                    realname = fname[len("_REGISTRY_USER_"):]
-                    self.grab_file(group_name, directory, fname, ntuser_id, is_rp=1, realname=realname)
-
-                self.refreshgui()
-                    
-    # parse RP structure
-    def parse_system_restore(self, path, idx, group_name):
-
-        elements = [path, "RP%d" % idx, "snapshot"]
-        
-        snappath = os.path.join(*elements)
-                    
-        self.parse_rp_folder(snappath, group_name)
-
-    def handle_sys_restore(self, idx, group_name):
-
-        startdir = r"\System Volume Information"
-        
-        # this will hit restore files for XP
-        for root,dirs,files in os.walk(startdir):
-            
-            for dirname in dirs:
-                if dirname.startswith("_restore{"):
-                    path = os.path.join(startdir, dirname)
-                    self.parse_system_restore(path, idx, group_name)
-                    self.refreshgui()
-
-    def acquire_backup_files(self, idxs):
-
-        for idx in idxs:
-            
-            self.handle_sys_restore(idx, "RP%d" % idx)
-        
-    # get the active core & user registry files
-    def acquire_active_files(self, current_idx):
-
-        self.handle_sys_restore(current_idx, "CORE")
         
     def updateLabel(self, msg):
     
@@ -237,158 +565,7 @@ class acquire_files:
             self.gui.update()
             self.gui.app.processEvents()
         
-    def set_system_restore_point(self):
-
-        wmiobj = win32com.client.GetObject (r"winmgmts:{impersonationLevel=impersonate}!root/default:SystemRestore")
-        sysRestore = wmi._wmi_object (wmiobj)
-        
-        methods = sysRestore.Methods_("CreateRestorePoint")
-        params  = methods.InParameters
-        
-        params.Properties_.Item('Description').Value      = "Registry Decoder Restore Point"
-        params.Properties_.Item('RestorePointType').Value = 0
-        params.Properties_.Item('EventType').Value        = 100
-        
-        try:
-            retval = sysRestore.ExecMethod_("CreateRestorePoint", params)
-        except Exception, e:
-            self.gui.msgBox("Unable to create a System Restore Point. Please check that you are running as administrator and that this computer has System Restore Point enabled.")
-            return False
-                
-        ret = retval.Properties_.Item('ReturnValue').Value
-    
-        if ret != 0:
-            self.gui.msgBox("Unable to create a System Restore Point. Please check that you are running as administrator and that this computer has System Restore Point enabled.")
-            return False
-            
-        return True
-                         
-    def get_shadows(self):
-    
-        ret = []
-        
-        wmiobj = win32com.client.GetObject ("winmgmts:")        
-        insts = wmiobj.InstancesOf("Win32_ShadowCopy")
-        
-        # there has to be a better way to check if the instancesOf returned valid data...
-        try:
-            len(insts)
-        except:
-            return ret
-        
-        for inst in insts:
-            ret.append(inst.DeviceObject)
-      
-        return ret
-      
-    # this gets the directory to make the symbolic link in
-    def get_vss_dir(self, shadow, i=0):
-    
-        vssfolder = r"\registrydecodervss%d" % i
-
-        try:
-            win32file.CreateSymbolicLink(vssfolder, shadow, 1)
-        except Exception, e:
-            #print "Exception: %s" % str(e)
-            (vssfolder, i) = self.get_vss_dir(shadow, i + 1)
-            
-        return (vssfolder, i)
-        
-    def get_core_files_vss(self, directory, group_name, is_rp, gid):
-    
-        corefiles = ["SAM", "SECURITY", "SYSTEM", "SOFTWARE", "DEFAULT"]
-
-        coreelements = [directory, "windows", "system32", "config"]
-
-        corepath = os.path.join(*coreelements)
-
-        for fname in corefiles:
-                   
-            self.grab_file(group_name, corepath, fname, gid, is_rp=is_rp)
-            self.refreshgui()
-            
-    def get_user_files_vss(self, shadow, group_name, is_rp, gid):
-    
-        userspath = os.path.join(shadow, "Users")
-        
-        for username in os.listdir(userspath):
-        
-            # path to a specific user
-            ntpath = os.path.join(userspath, username)
-            fpath  = os.path.join(ntpath, "ntuser.dat")
-                
-            if os.path.exists(fpath):
-                self.grab_file(group_name, ntpath, "ntuser.dat", gid, is_rp=is_rp, realname=username)
-                self.refreshgui()
-                    
-    def get_vss_reg_files(self, shadow, linkdir, active):
-        
-            
-
-        if active:
-            group_name = "CORE"
-            is_rp      = 0
-            core_id    = self.gid
-            ntuser_id  = self.gid
-        else:
-
-            group_name = "VSS%d" % self.vss_ctr
-            
-            rp_id     = self.type_id(group_name, self.gid)
-
-            core_id   = self.new_rp("CORE",   rp_id)
-            ntuser_id = self.new_rp("NTUSER", rp_id)        
-
-            is_rp = 1
-
-            self.vss_ctr = self.vss_ctr + 1
-
-        self.refreshgui()
-        self.get_core_files_vss(linkdir, group_name, is_rp, core_id)
-        self.refreshgui()
-        
-        if active:
-            group_name = "NTUSER"
-        
-        self.refreshgui()      
-        self.get_user_files_vss(linkdir, group_name, is_rp, ntuser_id)
-        self.refreshgui()
-        
-    def acquire_active_files_vss(self, shadow, active=1):
-    
-        # this is where the 'shadow' is mounted
-        (linkdir, unused) = self.get_vss_dir(shadow)
-
-        self.refreshgui()
-        self.get_vss_reg_files(shadow, linkdir, active)
-        self.refreshgui()
-        
-        win32file.RemoveDirectory(linkdir)
-      
-    def acquire_backup_files_vss(self, shadows):
-            
-        for shadow in shadows:
-            
-            self.acquire_active_files_vss(shadow, 0)
-            self.refreshgui()
-      
-    def get_rps(self):
-
-        ret = []
-        
-        wmiobj = win32com.client.GetObject("winmgmts:root/default")
-        allrps    = wmiobj.InstancesOf ("SystemRestore")
-                
-        for rp in allrps:
-            ret.append(rp.SequenceNumber)
-
-        return ret
-    
-    def set_rp_point(self):
-
-        # this will set a traditional RP on XP type systems and force a VSS creation on vista/7
-        self.updateLabel("Setting System Restore Point")
-        return self.set_system_restore_point()
+                            
      
     # gather all the files from the system
     # auto detect OS of image
@@ -402,67 +579,47 @@ class acquire_files:
         self.cursor.execute("insert into partitions (number, offset, evidence_file_id) values (?, ?, ?)", [0, 0, evi_id])
         self.part_id = self.cursor.execute("SELECT last_insert_rowid()").fetchone()[0]
  
+        # find the OS install drive and its raw/partition path
+        letter  = os.getenv("SystemDrive")
+        if letter[-1] != "\\":
+            letter = letter + "\\"
+
+        # raw path to the system drive
+        path = win32file.GetVolumeNameForVolumeMountPoint(letter)
+        path = path.replace("?",".")
+        path = path.rstrip("\\")
+                
+        img_info  = pytsk3.Img_Info(path)
+        fs        = pytsk3.FS_Info(img_info)
+        
         winver = platform.release()
 
         # vss
         if winver in ['Vista', '7']:
         
-            self.updateLabel("Processing the Volume Shadow Service")
-
-            if self.acquire_backups:
+            self.updateLabel("Processing Vista/7")
             
-                backups = self.get_shadows()
-
-                self.gid = self.group_id("VSS")
-
-                self.updateLabel("Acquiring Backup Files")
-                self.acquire_backup_files_vss(backups)
-		
-            if self.acquire_current:
-
-                if not self.set_rp_point():
-                    return False
-
-                current = self.get_shadows()[-1]
-
-                self.gid = self.group_id("Current")
-
-                self.updateLabel("Acquiring Current Files")
-                self.acquire_active_files_vss(current)
-                self.conn.commit()    
+            cls = vista7(self)
 
         # sys restore
         elif winver == 'XP':
 
-            self.updateLabel("Processing System Restore Point Data")
+            self.updateLabel("Processing Windows XP")
 
-            if self.acquire_backups:
-            
-                backups = self.get_rps()
-    
-                self.gid = self.group_id("RestorePoints")
-                
-                self.updateLabel("Acquiring Backup Files")
-                self.acquire_backup_files(backups)
-           
-            if self.acquire_current:
-
-                if not self.set_rp_point():
-                    return False
-
-                # get the last rp (the one we just made)
-                current = self.get_rps()[-1]
-
-                self.gid = self.group_id("Current")
-
-                self.updateLabel("Acquiring Current Files")
-                self.acquire_active_files(current)
-                self.conn.commit()
+            cls = XP(self)
 
         else:               
             self.gui.msgBox("Your operating system is unsupported. Please file a bug if you are running on Windows 7, Vista, or XP.") 
             return False
 
+        if self.acquire_backups:
+            cls.backup_ops.acquire_files(fs)     
+            self.conn.commit()
+           
+        if self.acquire_current:
+            cls.current_ops.acquire_files(fs)
+            self.conn.commit()
+            
         self.updateLabel("Final Processing")
         self.conn.commit()    
         self.updateLabel("Finished Processing. Files successfully acquired.")
