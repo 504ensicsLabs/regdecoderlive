@@ -287,7 +287,7 @@ class vss_ops:
     # this gets the directory to make the symbolic link in
     def _get_vss_dir(self, shadow, i=0):
     
-        vssfolder = r"\registrydecodervss%d" % i
+        vssfolder  = os.getenv("SystemDrive") + "\\" + "registrydecodervss%d" % i
 
         try:
             win32file.CreateSymbolicLink(vssfolder, shadow, 1)
