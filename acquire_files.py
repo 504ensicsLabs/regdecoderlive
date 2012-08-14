@@ -22,7 +22,7 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA 
 #
-import sys, os, sqlite3, win32com.client, shutil, win32file, platform, pytsk3
+import sys, os, sqlite3, win32com.client, shutil, win32file, platform, pytsk3, ctypes
 
 from error_classes import *
 
@@ -455,13 +455,19 @@ class acquire_files:
         
         self.store_dir = os.path.join(output_directory, "registryfiles")
 
+        self.check_admin()
+
         # this makes testing easier to avoid exception        
         try:
             os.mkdir(self.store_dir)
         except Exception, e:
             pass
 
-        self.db_ops()    
+        self.db_ops()
+
+    def check_admin(self):
+        if (ctypes.windll.shell32.IsUserAnAdmin() == 0):
+            self.fatal("This program must be run as an Administrator!")          
     
     def connect_db(self, directory, db_name):
 
@@ -555,7 +561,17 @@ class acquire_files:
             self.gui.resultsLabel.setText(msg)
             self.refreshgui()
         else:
-            print "UPDATE: %s" % msg   
+            print "UPDATE: %s" % msg  
+
+    def fatal(self, msg):
+        self.message(msg)
+        sys.exit()
+
+    def message(self, msg): 
+        if self.gui:
+            self.gui.msgBox(msg)
+        else:
+            print msg
  
     def refreshgui(self):
 
@@ -609,7 +625,7 @@ class acquire_files:
             cls = XP(self)
 
         else:               
-            self.gui.msgBox("Your operating system is unsupported. Please file a bug if you are running on Windows 7, Vista, or XP.") 
+            self.message("Your operating system is unsupported. Please file a bug if you are running on Windows 7, Vista, or XP.") 
             return False
 
         if self.acquire_backups:
